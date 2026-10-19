@@ -41,19 +41,22 @@ static int write_blob(const char *dir, const char *tag, const char *suffix,
 static void put_le16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put_le32(uint8_t *p, uint32_t v) { put_le16(p, (uint16_t)v); put_le16(p + 2, (uint16_t)(v >> 16)); }
 
-static int write_fb(const char *dir, const char *tag, const uint8_t *pixels,
-                    int pitch, int x0, int h) {
-  const int w = 256;
+static int write_fb_named(const char *dir, const char *tag, const char *suffix,
+                          const uint8_t *pixels, int pitch, int x0, int w,
+                          int h) {
   uint8_t *raw = (uint8_t *)malloc((size_t)w * h * 4);
   if (!raw) return -1;
   for (int y = 0; y < h; y++)
     memcpy(raw + (size_t)y * w * 4, pixels + (size_t)y * pitch + (size_t)x0 * 4,
            (size_t)w * 4);
-  int rc = write_blob(dir, tag, ".fb.bgrx", raw, (size_t)w * h * 4);
+  char name[32];
+  snprintf(name, sizeof(name), ".%s.bgrx", suffix);
+  int rc = write_blob(dir, tag, name, raw, (size_t)w * h * 4);
 
-  FILE *f = open_out(dir, tag, ".fb.bmp", "wb");
+  snprintf(name, sizeof(name), ".%s.bmp", suffix);
+  FILE *f = open_out(dir, tag, name, "wb");
   if (f) {
-    const int row = w * 3;
+    const int row = (w * 3 + 3) & ~3; /* BMP rows are padded to 4 bytes */
     uint8_t hdr[54] = { 'B', 'M' };
     put_le32(hdr + 2, 54u + (uint32_t)(row * h));
     put_le32(hdr + 10, 54);
@@ -67,6 +70,7 @@ static int write_fb(const char *dir, const char *tag, const uint8_t *pixels,
     uint8_t *line = (uint8_t *)malloc((size_t)row);
     for (int y = h - 1; y >= 0 && line; y--) {
       const uint8_t *s = raw + (size_t)y * w * 4;
+      memset(line, 0, (size_t)row);
       for (int x = 0; x < w; x++) {
         line[x * 3 + 0] = s[x * 4 + 0];
         line[x * 3 + 1] = s[x * 4 + 1];
@@ -81,6 +85,12 @@ static int write_fb(const char *dir, const char *tag, const uint8_t *pixels,
   }
   free(raw);
   return rc;
+}
+
+/* Native 256-pixel center of the field, the historical dump shape. */
+static int write_fb(const char *dir, const char *tag, const uint8_t *pixels,
+                    int pitch, int x0, int h) {
+  return write_fb_named(dir, tag, "fb", pixels, pitch, x0, 256, h);
 }
 
 static void write_regs(const char *dir, const char *tag, uint32_t frame) {
@@ -164,8 +174,17 @@ static void write_dmas(const char *dir, const char *tag, uint32_t frame) {
 int snes_state_dump(const char *dir, const char *tag, const uint8_t *pixels,
                     int pitch_bytes, int x0, int height, uint32_t frame) {
   int rc = 0;
-  if (pixels && height > 0)
+  if (pixels && height > 0) {
     rc |= write_fb(dir, tag, pixels, pitch_bytes, x0, height);
+    /* Optional full widened field (margins included), for host-side
+     * diagnostics of native_widescreen rendering. Native crops stay the
+     * default so existing dump consumers see the same files. */
+    const char *full = getenv("SNESRECOMP_DUMP_FULL_FB");
+    int full_w = pitch_bytes / 4;
+    if (full && *full && full[0] != '0' && full_w > 256)
+      rc |= write_fb_named(dir, tag, "fbwide", pixels, pitch_bytes, 0, full_w,
+                           height);
+  }
   rc |= write_blob(dir, tag, ".wram.bin", g_ram, sizeof(g_ram));
   if (g_ppu) {
     uint8_t buf[0x10000];

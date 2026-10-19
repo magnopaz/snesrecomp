@@ -103,10 +103,16 @@ static inline void PpuWidescreenAdjustPinnedWindowEdges(
     int *w2r) {
   if (screen_left == 0 && screen_right == kPpuXPixels)
     return;
-  if (*w1l == 0) *w1l = screen_left;
-  if (*w1r == kPpuXPixels - 1) *w1r = screen_right - 1;
-  if (*w2l == 0) *w2l = screen_left;
-  if (*w2r == kPpuXPixels - 1) *w2r = screen_right - 1;
+  /* Only a window that spans more than one native pixel can be anchored to a
+   * screen edge. [0,0] and [255,255] are how games park a closed window; the
+   * old unconditional remap turned [0,0] into [screen_left,0] -- a live
+   * window covering the whole left margin. Demon's Crest's dialogue box uses
+   * such a parked fixed-color window on its non-box scanlines, which painted
+   * a purple strip into the left margin. */
+  if (*w1l == 0 && *w1r > *w1l) *w1l = screen_left;
+  if (*w1r == kPpuXPixels - 1 && *w1r > *w1l) *w1r = screen_right - 1;
+  if (*w2l == 0 && *w2r > *w2l) *w2l = screen_left;
+  if (*w2r == kPpuXPixels - 1 && *w2r > *w2l) *w2r = screen_right - 1;
 }
 
 /* Renderer-neutral host-overlay extraction. BG source values deliberately
