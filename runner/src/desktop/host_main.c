@@ -2988,6 +2988,17 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
 }
 
 int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **argv) {
+#ifdef _WIN32
+  /* The executable is built for the GUI subsystem, so a terminal launch has
+   * no console handles and every diagnostic (exit reason, crash banner) went
+   * nowhere. Attach to the parent console when there is one and reopen the
+   * standard streams, so QA runs from a terminal actually show them. */
+  if (!GetStdHandle(STD_ERROR_HANDLE) && AttachConsole(ATTACH_PARENT_PROCESS)) {
+    (void)freopen("CONOUT$", "w", stdout);
+    (void)freopen("CONOUT$", "w", stderr);
+    (void)freopen("CONIN$", "r", stdin);
+  }
+#endif
   if (!game || !game->game_info || !game->display_name) {
     fprintf(stderr, "snesrecomp_desktop_main: descriptor needs display_name and game_info\n");
     return 2;
@@ -3093,6 +3104,22 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
       host_report_breadcrumb("config dir anchored: %s (exe-dir anchor: %s)",
                              getcwd(cwdbuf, sizeof(cwdbuf)) ? cwdbuf : "(unknown)",
                              anchored ? "ok" : "declined");
+    }
+    /* The report of the previous run (which may have ended unexpectedly) is
+     * about to be overwritten at this run's exit. Keep it for diagnostics. */
+    {
+      FILE *in = fopen("last_run_report.json", "rb");
+      if (in) {
+        FILE *out = fopen("last_run_report.prev.json", "wb");
+        if (out) {
+          char buf[4096];
+          size_t n;
+          while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+            fwrite(buf, 1, n, out);
+          fclose(out);
+        }
+        fclose(in);
+      }
     }
   }
   if (game->state_menu_hotkeys) ConfigUseStateMenuDefaults();
@@ -4254,6 +4281,7 @@ error_reading:;
     g_frame_timings = NULL;
   }
   host_report_breadcrumb("exit: %s after %u frames", exit_reason, frameCtr);
+  fprintf(stderr, "exit: %s after %u frames\n", exit_reason, frameCtr);
   host_report_breadcrumb("video totals: simulations=%u presentations=%llu seconds=%.3f",
                          frameCtr, (unsigned long long)presentations,
                          run_end - run_start);

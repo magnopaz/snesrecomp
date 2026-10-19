@@ -3275,6 +3275,16 @@ int ppu_rasterTakeHdmaen(uint8_t *out) {
   return 1;
 }
 
+/* A forced blank followed by an unblank later in the same field is the game's
+ * upload cover; a field whose last INIDISP write is still blank is a real
+ * transition and must keep its black. */
+static bool raster_field_unblanks_after(const PpuRasterField *f, int from) {
+  for (int j = from; j < f->count; j++)
+    if (f->e[j].reg == 0x2100 && !(f->e[j].val & 0x80))
+      return true;
+  return false;
+}
+
 /* Restore the baseline of the last completed field. Called BEFORE the render
  * loop -- i.e. before dma_initHdma and the first dma_doHdma -- never inside
  * line 1: HDMA writes the same registers per line, and a restore after line
@@ -3293,10 +3303,11 @@ void ppu_rasterRenderBegin(Ppu *ppu) {
   s_raster_upload_cover = 0;
   memcpy(&ppu->inidisp, f->regs, PPU_SAVESTATE_REGS_SIZE);
   /* Host policy (PpuSetIgnoreForcedBlank): a field that starts forced-blanked
-   * but whose last INIDISP write is a brightness value was covered for an
-   * upload that has already happened; start the walk with the brightness
-   * state instead of a blank first line. */
-  if (ppu->wsIgnoreForcedBlank)
+   * but unblanks later in the same field was covered for an upload that has
+   * already happened; start the walk with the brightness state instead of a
+   * blank first line. A field that stays blank keeps its authentic black. */
+  if (ppu->wsIgnoreForcedBlank && (ppu->inidisp & 0x80) &&
+      raster_field_unblanks_after(f, 0))
     ppu->inidisp = (uint8_t)(ppu->inidisp & 0x7F);
   ppu->scrollPrev = f->scrollPrev;
   ppu->scrollPrev2 = f->scrollPrev2;
@@ -3364,10 +3375,15 @@ void ppu_rasterApplyLine(Ppu *ppu, int line) {
       }
     } else if (reg == 0x2100 && (val & 0x80) && ppu->wsIgnoreForcedBlank) {
       /* Host policy (PpuSetIgnoreForcedBlank): a forced blank that covers a
-       * CPU-half upload, not visible content. The upload already happened
-       * before this walk, so replaying the blank would only darken the first
-       * visible lines. Brightness writes still replay. */
-      s_raster_upload_cover = 1;
+       * CPU-half upload, not visible content. Drop it only when the game
+       * unblanks later in the same field; a field that stays blank is a real
+       * transition and keeps its black. Brightness writes still replay. */
+      if (raster_field_unblanks_after(f, s_raster_next + 1)) {
+        s_raster_upload_cover = 1;
+      } else {
+        s_raster_upload_cover = 0;
+        raster_replay(ppu, reg, val);
+      }
     } else if (reg == 0x2100 && ppu->wsIgnoreForcedBlank) {
       s_raster_upload_cover = 0;
       raster_replay(ppu, reg, val);
