@@ -1,6 +1,8 @@
 #ifndef SNESRECOMP_BEAM_FRAME_DRIVER_H
 #define SNESRECOMP_BEAM_FRAME_DRIVER_H
 
+#include <stdint.h>
+
 /* Beam-aligned frame driver for whole-program LLE ports.
  *
  * One host frame is one PPU field, cut where hardware raises NMI: the beam's
@@ -28,5 +30,11 @@ void snes_beam_frame_driver_draw_ppu_frame_observed(
     SnesBeamRasterObserver *observer, void *context);
 /* Forget the booted machine: the next frame starts from the reset vector. */
 void snes_beam_frame_driver_reset(void);
+/* A save-state load restored the guest: re-arm the driver so the next frame
+ * continues at `resume_pc24` (the title's frame-model re-entry point, e.g.
+ * its scheduler loop) instead of taking the reset-vector boot path. Pass 0
+ * to fall back to the bridge's resume PC, then the reset vector. Call from
+ * RtlGameInfo.on_state_loaded. */
+void snes_beam_frame_driver_state_loaded(uint32_t resume_pc24);
 
 #endif /* SNESRECOMP_BEAM_FRAME_DRIVER_H */

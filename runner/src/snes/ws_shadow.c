@@ -1278,15 +1278,19 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
     return realTile;
   WsShadowLayer *layer = &s_layers[layerIndex];
   /*
-   * The 8x8 background renderers call once per tile chunk. A hardware window
-   * can make the final chunk start inside the native viewport but extend into
-   * the right margin (for example x=255..262). Treat that whole straddling
-   * chunk as world-keyed shadow data; returning the circular VRAM tile inserts
-   * an exact one-tile seam before margin rendering begins.
-   */
+   * The 8x8 background renderers call once per tile chunk. A chunk that
+   * straddles the native edge (for example x=255..262) used to be served
+   * from the world-keyed history, to avoid a one-tile seam where margin
+   * rendering begins. That is only safe when the history cell matches the
+   * live VRAM tile: Demon's Crest's streamer updates columns the moment
+   * they reach the native edge, so the straddling cell can hold content the
+   * sweep has not observed, and the native edge columns then differed from
+   * the authentic frame (measured: native x=0..5 and x=251..255 changed).
+   * Native columns must always come from the renderer's own tile; the seam
+   * is confined to the margin, where it is one tile wide. */
   const int tile_pixels = 1 << (layer->tileShift ? layer->tileShift : 3);
   if (!layer->active ||
-      (screenX >= 0 && screenX + tile_pixels <= 256))
+      (screenX + tile_pixels > 0 && screenX < 256))
     return realTile;
 
   /* Layered margin sources, exact-first: (1) the world-keyed history —

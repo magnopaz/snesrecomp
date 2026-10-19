@@ -253,6 +253,14 @@ struct Ppu {
   // Optional bitmask of BG layers allowed to render in the side margins.
   // Zero preserves the default behavior (BG1/BG2 wide, BG3 policy above).
   uint8_t wsLayerWidenMask;
+  // Host policy: drop INIDISP forced-blank writes (bit 7 set) from the render
+  // replay. The CPU half runs before the raster walk, so a mid-frame blank
+  // that only covers a VRAM/OAM upload is not needed to hide it; replaying it
+  // merely blanks the first N visible lines. Brightness writes (bit 7 clear,
+  // including fades) are unaffected. Also ignores the $420C change that opens
+  // an upload cover and changes while it is open, so HDMA tables run from the
+  // field start. 0 = authentic. See PpuSetIgnoreForcedBlank.
+  uint8_t wsIgnoreForcedBlank;
   // Optional native-width Mode 2 layer capture. Stored as layer+1 so zero is
   // disabled; pixels are palette indices for the most recently drawn frame.
   uint8_t wsMode2CaptureLayer;
@@ -812,6 +820,23 @@ void PpuWsSetOamRightHints(Ppu *ppu, const uint8_t *hints);
 // level content on BG3 below it (e.g. SMW water) fills 16:9. from_y 0 = off.
 // Like the other widescreen setters, callers re-apply per frame.
 void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y);
+
+// Host policy for raster fields whose game blanks the screen around a VRAM/OAM
+// upload (INIDISP bit 7) and unblanks it later in the same field. This frame
+// model runs the CPU half before the raster walk, so the upload was never
+// visible and replaying the blank only darkens the first N visible lines --
+// a visible flicker when the upload's duration varies. With this enabled the
+// render replay drops forced-blank writes (bit 7 set); brightness writes,
+// including fades, are untouched. The same cover usually brackets an HDMA
+// disable/restore ($420C); that change is bookkeeping too, so the replay also
+// ignores the $420C write that opens a cover (one immediately followed by a
+// forced blank) and any $420C change while the cover is open. The field's HDMA
+// then keeps running from line 0 with the mask the CPU half left -- which is
+// what its tables were authored for; a real mid-field HDMA change with no
+// blank still replays. Outside such fields leave it disabled: a game that
+// blanks a real split or a whole transitional field must keep it.
+// 0 = authentic; callers re-apply per frame like the other setters.
+void PpuSetIgnoreForcedBlank(Ppu *ppu, bool enabled);
 
 // Restrict side-margin background rendering to the selected BG layer bits.
 // The authentic center and OBJ rendering are unaffected. A zero mask restores

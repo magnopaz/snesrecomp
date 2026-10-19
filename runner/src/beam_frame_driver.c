@@ -269,3 +269,20 @@ void snes_beam_frame_driver_reset(void) {
   s_resume_pc = 0;
   s_wai_halted = false;
 }
+
+/* A save-state load restored the guest but not this driver's resume point.
+ * `resume_pc24` is the guest's own re-entry point for its frame model (a
+ * scheduler scan loop, typically): the state's tasks resume from their saved
+ * stacks, exactly as they do after a yield. Without this call a load in a
+ * fresh process (--resume-state, a scripted loadstate, a lobby handoff) left
+ * s_resume_pc at 0, so the next frame took the reset-vector boot path and
+ * clobbered the loaded machine. */
+void snes_beam_frame_driver_state_loaded(uint32_t resume_pc24) {
+  if (resume_pc24)
+    s_resume_pc = resume_pc24;
+  else if (!s_resume_pc) {
+    uint32_t resume = interp_bridge_lle_resume_pc();
+    s_resume_pc = resume ? resume : reset_vector();
+  }
+  s_wai_halted = false;
+}

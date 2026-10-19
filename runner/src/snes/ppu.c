@@ -405,6 +405,12 @@ void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y) {
   ppu->wsBg3WidenY = from_y;
 }
 
+void PpuSetIgnoreForcedBlank(Ppu *ppu, bool enabled) {
+  if (!ppu)
+    return;
+  ppu->wsIgnoreForcedBlank = enabled ? 1 : 0;
+}
+
 void PpuWsSetOamLeftHints(Ppu *ppu, const uint8_t *hints) {
   if (hints) {
     ppu->wsOamLeftHintStrict = 1;
@@ -3175,6 +3181,7 @@ static const PpuRasterField *s_raster_render;
 static int s_raster_next;
 static uint8_t s_raster_hdmaen;
 static int s_raster_hdmaen_pending;
+static int s_raster_upload_cover;
 static struct {
   uint8_t oamAdr, oamInHigh, oamSecondWrite, oamBuffer;
 } s_raster_port;
@@ -3283,7 +3290,14 @@ void ppu_rasterRenderBegin(Ppu *ppu) {
   s_raster_port.oamInHigh = ppu->oamInHigh;
   s_raster_port.oamSecondWrite = ppu->oamSecondWrite;
   s_raster_port.oamBuffer = ppu->oamBuffer;
+  s_raster_upload_cover = 0;
   memcpy(&ppu->inidisp, f->regs, PPU_SAVESTATE_REGS_SIZE);
+  /* Host policy (PpuSetIgnoreForcedBlank): a field that starts forced-blanked
+   * but whose last INIDISP write is a brightness value was covered for an
+   * upload that has already happened; start the walk with the brightness
+   * state instead of a blank first line. */
+  if (ppu->wsIgnoreForcedBlank)
+    ppu->inidisp = (uint8_t)(ppu->inidisp & 0x7F);
   ppu->scrollPrev = f->scrollPrev;
   ppu->scrollPrev2 = f->scrollPrev2;
   ppu->m7prev = f->m7prev;
@@ -3314,11 +3328,49 @@ void ppu_rasterApplyLine(Ppu *ppu, int line) {
     const uint16_t reg = f->e[s_raster_next].reg;
     const uint8_t val = f->e[s_raster_next].val;
     if (reg == 0x420C) {
-      /* Not ours to apply — HDMA lives in the DMA unit and enabling a channel
-       * mid-frame also has to (re)start its table. Hand it to the host, which
-       * owns the render loop and calls dma_initHdma/dma_doHdma. */
-      s_raster_hdmaen = val;
-      s_raster_hdmaen_pending = 1;
+      /* Upload-cover policy (PpuSetIgnoreForcedBlank): the game brackets its
+       * per-frame VRAM/OAM upload with `$420C=0` ... `$2100=$80` and restores
+       * both after the transfer. The CPU half has already performed that
+       * upload before this walk, so the HDMA-off window is bookkeeping, not
+       * display state -- and replaying it starts every HDMA table at the line
+       * the upload happened to finish, which moves effects that the table
+       * positioned from the top of the field. When the next journaled write is
+       * the forced blank, drop the disable and keep the field's HDMA running;
+       * a real mid-field HDMA change (no blank) still replays. */
+      bool is_cover = false;
+      if (ppu->wsIgnoreForcedBlank) {
+        if (s_raster_upload_cover) {
+          is_cover = true;
+        } else {
+          for (int j = s_raster_next + 1, n = 0;
+               j < f->count && n < 8; j++, n++) {
+            if (f->e[j].reg == 0x2100) {
+              is_cover = (f->e[j].val & 0x80) != 0;
+              break;
+            }
+            if (f->e[j].reg == 0x420C)
+              break;
+          }
+        }
+      }
+      if (is_cover) {
+        s_raster_upload_cover = 1;
+      } else {
+        /* Not ours to apply — HDMA lives in the DMA unit and enabling a
+         * channel mid-frame also has to (re)start its table. Hand it to the
+         * host, which owns the render loop and calls dma_initHdma/dma_doHdma. */
+        s_raster_hdmaen = val;
+        s_raster_hdmaen_pending = 1;
+      }
+    } else if (reg == 0x2100 && (val & 0x80) && ppu->wsIgnoreForcedBlank) {
+      /* Host policy (PpuSetIgnoreForcedBlank): a forced blank that covers a
+       * CPU-half upload, not visible content. The upload already happened
+       * before this walk, so replaying the blank would only darken the first
+       * visible lines. Brightness writes still replay. */
+      s_raster_upload_cover = 1;
+    } else if (reg == 0x2100 && ppu->wsIgnoreForcedBlank) {
+      s_raster_upload_cover = 0;
+      raster_replay(ppu, reg, val);
     } else {
       raster_replay(ppu, reg, val);
     }
