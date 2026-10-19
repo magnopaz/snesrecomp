@@ -896,8 +896,8 @@ static void PpuWindows_CalcWithExtra(PpuWindows *win, Ppu *ppu, uint layer,
   // from classifying otherwise valid side-margin pixels as outside.
   int w1l = ppu->window1left, w1r = ppu->window1right;
   int w2l = ppu->window2left, w2r = ppu->window2right;
-  PpuWidescreenAdjustPinnedWindowEdges(win->edges[0], window_right, &w1l,
-                                       &w1r, &w2l, &w2r);
+  PpuWidescreenAdjustPinnedWindowEdges((int)layer, win->edges[0], window_right,
+                                       &w1l, &w1r, &w2l, &w2r);
   if (ppu->wsWindowExpandLayers & (1u << layer)) {
     if ((ppu->wsWindowExpandWindows & 1u) &&
         ppu->window1left <= ppu->window1right) {

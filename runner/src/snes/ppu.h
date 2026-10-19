@@ -99,16 +99,27 @@ typedef struct PpuPixelPrioBufs {
 } __attribute__((aligned(8))) PpuPixelPrioBufs;
 
 static inline void PpuWidescreenAdjustPinnedWindowEdges(
-    int screen_left, int screen_right, int *w1l, int *w1r, int *w2l,
-    int *w2r) {
+    int layer, int screen_left, int screen_right, int *w1l, int *w1r,
+    int *w2l, int *w2r) {
   if (screen_left == 0 && screen_right == kPpuXPixels)
     return;
-  /* Only a window that spans more than one native pixel can be anchored to a
-   * screen edge. [0,0] and [255,255] are how games park a closed window; the
-   * old unconditional remap turned [0,0] into [screen_left,0] -- a live
-   * window covering the whole left margin. Demon's Crest's dialogue box uses
-   * such a parked fixed-color window on its non-box scanlines, which painted
-   * a purple strip into the left margin. */
+  /* A window parked as a one-pixel column on the old screen edge is an edge
+   * exclusion (Demon's Crest's BG1/BG2 use [0,0] for it). In widescreen the
+   * screen edge moved into the margin, so move the whole parked window there;
+   * leaving it at native x=0 would cut a one-pixel seam through the picture.
+   * The color window (layer 5) keeps its parked [0,0] -- there it is a real
+   * one-pixel fixed-color window, and growing it painted a purple strip into
+   * the margin. */
+  if (layer != 5) {
+    if (*w1l == 0 && *w1r == 0) *w1l = *w1r = screen_left;
+    if (*w1l == kPpuXPixels - 1 && *w1r == kPpuXPixels - 1)
+      *w1l = *w1r = screen_right - 1;
+    if (*w2l == 0 && *w2r == 0) *w2l = *w2r = screen_left;
+    if (*w2l == kPpuXPixels - 1 && *w2r == kPpuXPixels - 1)
+      *w2l = *w2r = screen_right - 1;
+  }
+  /* A live window anchored to a screen edge extends over the margin; a
+   * one-pixel parked window was already handled above. */
   if (*w1l == 0 && *w1r > *w1l) *w1l = screen_left;
   if (*w1r == kPpuXPixels - 1 && *w1r > *w1l) *w1r = screen_right - 1;
   if (*w2l == 0 && *w2r > *w2l) *w2l = screen_left;
