@@ -403,6 +403,12 @@ void PpuSetWsHudOamShiftRange2(Ppu *ppu, uint8_t first_slot, uint8_t nslots) {
 
 void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y) {
   ppu->wsBg3WidenY = from_y;
+  ppu->wsBg3WidenY1 = 0;
+}
+
+void PpuSetWidescreenBg3WidenRange(Ppu *ppu, uint8_t y0, uint8_t y1) {
+  ppu->wsBg3WidenY = y0;
+  ppu->wsBg3WidenY1 = y0 < y1 ? y1 : 0;
 }
 
 void PpuSetIgnoreForcedBlank(Ppu *ppu, bool enabled) {

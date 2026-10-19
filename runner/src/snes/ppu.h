@@ -267,6 +267,10 @@ struct Ppu {
   // so a BG3 status bar never tiles into the margins). SMW sets it to the HUD
   // band height so water/level content on BG3 below the bar fills 16:9.
   uint8_t wsBg3WidenY;
+  // Optional exclusive upper bound for the BG3 widen (0 = no bound). Lets a
+  // HUD band widen BG3 only on its own scanlines, so a dialogue box on the
+  // same layer below the band does not tile into the margins.
+  uint8_t wsBg3WidenY1;
   // Optional bitmask of BG layers allowed to render in the side margins.
   // Zero preserves the default behavior (BG1/BG2 wide, BG3 policy above).
   uint8_t wsLayerWidenMask;
@@ -517,7 +521,8 @@ static inline int PpuWidescreenLayerExtra(
   }
   if (layer != 2)
     return extra;
-  return (ppu->wsBg3WidenY && y >= ppu->wsBg3WidenY) ? extra : 0;
+  return (ppu->wsBg3WidenY && y >= ppu->wsBg3WidenY &&
+          (!ppu->wsBg3WidenY1 || y < ppu->wsBg3WidenY1)) ? extra : 0;
 }
 
 // Which world-mirror band, if any, governs BG(layer+1) on scanline y.
@@ -837,6 +842,10 @@ void PpuWsSetOamRightHints(Ppu *ppu, const uint8_t *hints);
 // level content on BG3 below it (e.g. SMW water) fills 16:9. from_y 0 = off.
 // Like the other widescreen setters, callers re-apply per frame.
 void PpuSetWidescreenBg3Widen(Ppu *ppu, uint8_t from_y);
+// Range form: BG3 widens only on scanlines [y0, y1). A HUD that anchors a
+// BG3 band uses this so the layer's other content (a dialogue box below the
+// band) stays in the authentic columns.
+void PpuSetWidescreenBg3WidenRange(Ppu *ppu, uint8_t y0, uint8_t y1);
 
 // Host policy for raster fields whose game blanks the screen around a VRAM/OAM
 // upload (INIDISP bit 7) and unblanks it later in the same field. This frame
