@@ -182,8 +182,8 @@ SNESRECOMP_URL=""
 if [ "$FRAMEWORK_IS_CHECKOUT" -eq 1 ]; then
     SNESRECOMP_URL=$(git -C "$FRAMEWORK_ROOT" remote get-url origin 2>/dev/null || true)
 fi
-[ -n "$SNESRECOMP_URL" ] || SNESRECOMP_URL="https://github.com/RetroPortingToolKit/snesrecomp.git"
-RECOMP_UI_URL="https://github.com/mstan/recomp-ui.git"
+[ -n "$SNESRECOMP_URL" ] || SNESRECOMP_URL="https://github.com/magnopaz/snesrecomp.git"
+RECOMP_UI_URL="https://github.com/magnopaz/recomp-ui.git"
 DEFAULT_BRANCH="main"
 ASSUME_YES=${SNESRECOMP_SETUP_YES:-0}
 
@@ -513,7 +513,7 @@ fi
 # out on RECOMP_LAUNCHER, which this call is what defines.
 LAUNCHER_BLOCK="# No GUI launcher: this project was scaffolded with --no-recomp-ui.
 # Add the submodule and re-run this block to get one:
-#   git submodule add https://github.com/mstan/recomp-ui.git recomp-ui
+#   git submodule add https://github.com/magnopaz/recomp-ui.git recomp-ui
 #   set(RECOMP_UI_ROOT \"\${CMAKE_SOURCE_DIR}/recomp-ui\" CACHE PATH \"\" FORCE)
 #   include(\${RECOMP_UI_ROOT}/recomp_ui.cmake)
 #   recomp_target_launcher_ui($PROJECT_NAME CONSOLE snes)"

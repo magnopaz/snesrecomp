@@ -1,7 +1,7 @@
 # @DISPLAY_NAME@ Recomp
 
 A native recompilation of **@DISPLAY_NAME@** (@REGION@), built on
-[snesrecomp](https://github.com/RetroPortingToolKit/snesrecomp).
+[snesrecomp](https://github.com/magnopaz/snesrecomp).
 
 @DESCRIPTION@
 

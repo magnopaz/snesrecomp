@@ -237,7 +237,7 @@ driver in `src/game_rtl.c` is where the game-specific work starts.
 ### Generate a project with the released CLI
 
 1. Download `snesrecomp-cli-windows-x86_64.zip` from
-   [Releases](https://github.com/mstan/snesrecomp/releases).
+   [Releases](https://github.com/magnopaz/snesrecomp/releases).
 2. Extract the entire archive to one folder.
 3. Open PowerShell there and run:
 
@@ -277,7 +277,7 @@ derived from that ROM, so do not redistribute it without permission.
 You need Git, Python 3.9 or newer, Rust 1.85 or newer, and PyInstaller:
 
 ```sh
-git clone https://github.com/mstan/snesrecomp.git
+git clone https://github.com/magnopaz/snesrecomp.git
 cd snesrecomp
 python -m pip install pyinstaller==6.21.0
 python tools/build_cli.py release

@@ -1240,5 +1240,5 @@ endfunction()
 include(${SNESRECOMP_RUNNER_ROOT}/recomp_net.cmake)
 
 # Dear ImGui pre-boot launcher is NOT vendored here. Games that need it add
-# RetroPortingToolKit/recomp-ui as a repo-root submodule and call recomp_target_launcher_ui()
+# magnopaz/recomp-ui as a repo-root submodule and call recomp_target_launcher_ui()
 # themselves (see docs/LAUNCHER_DESIGN.md).
