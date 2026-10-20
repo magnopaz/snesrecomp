@@ -60,4 +60,4 @@ Foreign PSX compiler activity was present. These are bounded observations on
 this Windows host, not statistical guarantees, whole-game coverage, or claims
 about mobile/Xbox performance. Super Mario Kart and Super Mario World use
 separate loops and were excluded. The unrelated 8bpp experiment remains draft
-in [PR 151](https://github.com/RetroPortingToolKit/snesrecomp/pull/151).
+in [PR 151's branch](https://github.com/magnopaz/snesrecomp/tree/codex/ppu-tile-batch-hle).
