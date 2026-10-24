@@ -99,6 +99,57 @@ static volatile int s_pending_loadstate = -1;  // -1 = none, 0-11 = slot to load
 static volatile uint32_t s_controller_inputs = 0;  // p1 bits 0..11, p2 bits 12..23
 static volatile uint32_t s_controller_active = 0;  // bit0=p1 present, bit1=p2 present
 
+/* ---- input recording / deterministic replay -------------------------------
+ * The debug client can record the controller stream it feeds the runner and
+ * replay it frame-exactly, so a capture made once (a boss fight, an animation)
+ * can be reproduced without a human at the keyboard. */
+typedef struct RecSample {
+    int frame;
+    uint32_t inputs;   /* p1 bits 0..11, p2 bits 12..23 */
+    uint32_t active;   /* controller-present bits */
+} RecSample;
+
+static RecSample *s_inrec = NULL;
+static int s_inrec_count = 0;
+static int s_inrec_cap = 0;
+static int s_inrec_active = 0;
+
+static RecSample *s_replay = NULL;
+static int s_replay_count = 0;
+static int s_replay_cursor = 0;
+static int s_replay_active = 0;
+
+static int s_last_frame_seen = -1;
+
+/* ---- frame-sequence capture (PNG-less BMP frames, one file per frame) ---- */
+static int s_seq_active = 0;
+static char s_seq_dir[512] = {0};
+static int s_seq_every = 1;
+static int s_seq_limit = 0;
+static int s_seq_written = 0;
+static int s_seq_err = 0;
+
+/* Rolling capture: keeps the last N presented frames in RAM plus the input
+ * stream, so a boss fight can be saved after it happened. Enabled with
+ * SNESREC_RING=1 (SNESREC_RING_FRAMES, default 300) or record_ring_start. */
+static uint8_t *s_ring = NULL;
+static int *s_ring_frames = NULL;
+static int s_ring_cap = 0;
+static int s_ring_next = 0;
+static int s_ring_filled = 0;
+static int s_ring_active = 0;
+static int s_ring_w = 0, s_ring_h = 0;
+
+static void ring_start(int frames);
+static void ring_tick(int frame);
+static int ring_dump(const char *dir);
+
+static void input_record_tick(int frame);
+static void input_replay_apply(int frame);
+static void frames_record_tick(int frame);
+static int capture_present(uint8_t *dst, int *out_w, int *out_h);
+static int write_bmp24(const char *path, const uint8_t *buf, int w, int h);
+
 // Lightweight block breakpoints for normal SNESRECOMP_TRACE builds. These
 // use the always-emitted cpu_trace_block() hooks and do not require
 // SNESRECOMP_REVERSE_DEBUG or reverse-debug generated WRAM stores.
@@ -1619,6 +1670,9 @@ static void DebugPpuRenderAuthentic(uint8_t *pixels) {
 
 void debug_server_record_frame(int frame) {
     extern uint8_t g_ram[];
+    s_last_frame_seen = frame;
+    frames_record_tick(frame);
+    ring_tick(frame);
     /* Headless runners link the debug module for shared instrumentation but
      * intentionally do not start its TCP service. Do not commit the 1.2 GB
      * history ring or touch synchronization state in that configuration. */
@@ -5019,6 +5073,390 @@ void debug_server_note_composed_frame(const void *argb, unsigned pitch,
     s_composed_width = width;
     s_composed_height = height;
     s_composed_valid = 1;
+}
+
+/* ============================ recording support ==========================
+ * Frame-exact capture of a play session:
+ *   record_input_start                     begin buffering the input stream
+ *   record_input_stop [path.jsonl]         write it (frame, inputs, active)
+ *   replay_input <path.jsonl>              feed it back deterministically
+ *   replay_stop
+ *   record_frames <dir> <count> [every]    dump consecutive frames as BMP
+ *   record_frames_stop
+ *   record_status
+ * The replay is applied in debug_server_get_controller_inputs(), i.e. before
+ * the runner samples the pad, so frame N in the file drives frame N on replay.
+ * ====================================================================== */
+
+static int rec_grow(RecSample **arr, int *cap, int need) {
+    if (*cap >= need)
+        return 1;
+    int next = *cap ? *cap * 2 : 256;
+    while (next < need)
+        next *= 2;
+    RecSample *grown = (RecSample *)realloc(*arr, (size_t)next * sizeof(**arr));
+    if (!grown)
+        return 0;
+    *arr = grown;
+    *cap = next;
+    return 1;
+}
+
+static void input_record_tick(int frame) {
+    if (!s_inrec_active)
+        return;
+    if (s_inrec_count > 0 && s_inrec[s_inrec_count - 1].frame == frame)
+        return;  /* the runner may poll the pad more than once per frame */
+    if (!rec_grow(&s_inrec, &s_inrec_cap, s_inrec_count + 1)) {
+        s_inrec_active = 0;
+        return;
+    }
+    s_inrec[s_inrec_count].frame = frame;
+    s_inrec[s_inrec_count].inputs = s_controller_inputs;
+    s_inrec[s_inrec_count].active = s_controller_active;
+    s_inrec_count++;
+}
+
+static void input_replay_apply(int frame) {
+    if (frame < 0)
+        return;
+    while (s_replay_cursor < s_replay_count &&
+           s_replay[s_replay_cursor].frame < frame)
+        s_replay_cursor++;
+    if (s_replay_cursor < s_replay_count &&
+        s_replay[s_replay_cursor].frame == frame) {
+        s_controller_inputs = s_replay[s_replay_cursor].inputs;
+        s_controller_active = s_replay[s_replay_cursor].active
+                                  ? s_replay[s_replay_cursor].active
+                                  : 3u;
+        s_replay_cursor++;
+    } else if (s_replay_cursor >= s_replay_count) {
+        s_replay_active = 0;  /* end of the recording: hand control back */
+    }
+}
+
+/* Copy the frame the player is actually looking at (same source as
+ * cmd_screenshot: a title compositor surface when one is running, else the PPU
+ * render buffer). Returns width/height through out params. */
+static int capture_present(uint8_t *dst, int *out_w, int *out_h) {
+    if (!g_ppu)
+        return 0;
+    int w, h;
+    if (s_composed_valid) {
+        w = s_composed_width;
+        h = s_composed_height;
+        memcpy(dst, s_composed_pixels, (size_t)w * (size_t)h * 4);
+    } else {
+        uint8_t *buf = g_ppu->renderBuffer;
+        uint32_t pitch = g_ppu->renderPitch;
+        w = 256 + 2 * g_ppu->extraLeftRight;
+        h = 224;
+        if (!buf || pitch < (uint32_t)w * 4)
+            return 0;
+        for (int y = 0; y < h; y++)
+            memcpy(dst + (size_t)y * w * 4, buf + (size_t)y * pitch,
+                   (size_t)w * 4);
+    }
+    *out_w = w;
+    *out_h = h;
+    return 1;
+}
+
+static int write_bmp24(const char *path, const uint8_t *buf, int w, int h) {
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return 0;
+    int row_bytes = w * 3;
+    int pad = (4 - (row_bytes % 4)) % 4;
+    int stride = row_bytes + pad;
+    int img_size = stride * h;
+    int file_size = 54 + img_size;
+    uint8_t hdr[54] = {0};
+    hdr[0] = 'B';
+    hdr[1] = 'M';
+    hdr[2] = (uint8_t)file_size;
+    hdr[3] = (uint8_t)(file_size >> 8);
+    hdr[4] = (uint8_t)(file_size >> 16);
+    hdr[5] = (uint8_t)(file_size >> 24);
+    hdr[10] = 54;
+    hdr[14] = 40;
+    hdr[18] = (uint8_t)w;
+    hdr[19] = (uint8_t)(w >> 8);
+    int neg_h = -h;
+    memcpy(&hdr[22], &neg_h, 4);
+    hdr[26] = 1;
+    hdr[28] = 24;
+    hdr[34] = (uint8_t)img_size;
+    hdr[35] = (uint8_t)(img_size >> 8);
+    hdr[36] = (uint8_t)(img_size >> 16);
+    hdr[37] = (uint8_t)(img_size >> 24);
+    fwrite(hdr, 1, 54, f);
+    static uint8_t row_buf[kPpuBufWidth * 3 + 4];
+    memset(row_buf, 0, sizeof(row_buf));
+    for (int y = 0; y < h; y++) {
+        const uint8_t *src = buf + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) {
+            row_buf[x * 3 + 0] = src[x * 4 + 0];
+            row_buf[x * 3 + 1] = src[x * 4 + 1];
+            row_buf[x * 3 + 2] = src[x * 4 + 2];
+        }
+        fwrite(row_buf, 1, (size_t)stride, f);
+    }
+    return fclose(f) == 0;
+}
+
+static void frames_record_tick(int frame) {
+    if (!s_seq_active || frame < 0)
+        return;
+    if (frame % (s_seq_every > 0 ? s_seq_every : 1) != 0)
+        return;
+    static uint8_t scr[kPpuBufWidth * 4 * 240];
+    int w = 0, h = 0;
+    if (!capture_present(scr, &w, &h)) {
+        s_seq_err = 1;
+        s_seq_active = 0;
+        return;
+    }
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/frame_%06d.bmp", s_seq_dir, frame);
+    if (!write_bmp24(path, scr, w, h))
+        s_seq_err = 2;
+    s_seq_written++;
+    if (s_seq_limit > 0 && s_seq_written >= s_seq_limit)
+        s_seq_active = 0;
+}
+
+/* Windows paths carry backslashes, which are not valid JSON escapes. Every
+ * path we echo back is normalised to forward slashes. */
+static void path_for_json(char *dst, size_t n, const char *src) {
+    size_t i = 0;
+    for (; src[i] && i + 1 < n; i++)
+        dst[i] = src[i] == '\\' ? '/' : src[i];
+    dst[i] = 0;
+}
+
+static void ring_start(int frames) {
+    if (frames < 1)
+        frames = 1;
+    if (frames > 1800)
+        frames = 1800;  /* cap the memory at ~40 s */
+    free(s_ring);
+    free(s_ring_frames);
+    s_ring = (uint8_t *)malloc((size_t)frames * 256 * 224 * 4);
+    s_ring_frames = (int *)malloc((size_t)frames * sizeof(int));
+    if (!s_ring || !s_ring_frames) {
+        free(s_ring);
+        free(s_ring_frames);
+        s_ring = NULL;
+        s_ring_frames = NULL;
+        s_ring_active = 0;
+        return;
+    }
+    s_ring_cap = frames;
+    s_ring_next = 0;
+    s_ring_filled = 0;
+    s_ring_w = 256;
+    s_ring_h = 224;
+    s_ring_active = 1;
+}
+
+static void ring_tick(int frame) {
+    if (!s_ring_active)
+        return;
+    if (!s_inrec_active && s_inrec_count == 0) {
+        /* A ring capture always keeps the matching input stream. */
+        s_inrec_active = 1;
+    }
+    int w = 0, h = 0;
+    uint8_t *slot = s_ring + (size_t)s_ring_next * 256 * 224 * 4;
+    if (!capture_present(slot, &w, &h) || w != 256 || h != 224) {
+        s_ring_active = 0;
+        return;
+    }
+    s_ring_frames[s_ring_next] = frame;
+    s_ring_next = (s_ring_next + 1) % s_ring_cap;
+    if (s_ring_filled < s_ring_cap)
+        s_ring_filled++;
+}
+
+static int ring_dump(const char *dir) {
+    if (!s_ring || s_ring_filled == 0)
+        return 0;
+    char path[1024];
+    int written = 0;
+    int start = (s_ring_next - s_ring_filled + s_ring_cap) % s_ring_cap;
+    for (int i = 0; i < s_ring_filled; i++) {
+        int slot = (start + i) % s_ring_cap;
+        snprintf(path, sizeof(path), "%s/frame_%06d.bmp", dir,
+                 s_ring_frames[slot]);
+        if (write_bmp24(path, s_ring + (size_t)slot * 256 * 224 * 4, 256, 224))
+            written++;
+    }
+    char inp[1100];
+    snprintf(inp, sizeof(inp), "%s/input_log.jsonl", dir);
+    FILE *f = fopen(inp, "wb");
+    if (f) {
+        for (int i = 0; i < s_inrec_count; i++)
+            fprintf(f, "{\"frame\":%d,\"inputs\":%u,\"active\":%u}\n",
+                    s_inrec[i].frame, s_inrec[i].inputs, s_inrec[i].active);
+        fclose(f);
+    }
+    return written;
+}
+
+static void cmd_record_input_start(const char *args) {
+    (void)args;
+    free(s_inrec);
+    s_inrec = NULL;
+    s_inrec_count = 0;
+    s_inrec_cap = 0;
+    s_inrec_active = 1;
+    send_fmt("{\"ok\":true,\"recording\":true,\"frame\":%d}",
+             s_last_frame_seen);
+}
+
+static void cmd_record_input_stop(const char *args) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s", (args && *args) ? args
+                                                       : "input_recording.jsonl");
+    s_inrec_active = 0;
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        send_fmt("{\"ok\":false,\"error\":\"cannot open output\","
+                 "\"path\":\"%s\"}", path);
+        return;
+    }
+    for (int i = 0; i < s_inrec_count; i++)
+        fprintf(f, "{\"frame\":%d,\"inputs\":%u,\"active\":%u}\n",
+                s_inrec[i].frame, s_inrec[i].inputs, s_inrec[i].active);
+    fclose(f);
+    int first = s_inrec_count ? s_inrec[0].frame : -1;
+    int last = s_inrec_count ? s_inrec[s_inrec_count - 1].frame : -1;
+    char shown[600];
+    path_for_json(shown, sizeof(shown), path);
+    send_fmt("{\"ok\":true,\"path\":\"%s\",\"samples\":%d,"
+             "\"first_frame\":%d,\"last_frame\":%d}", shown, s_inrec_count,
+             first, last);
+}
+
+static void cmd_replay_input(const char *args) {
+    if (!args || !*args) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: replay_input <path>\"}");
+        return;
+    }
+    FILE *f = fopen(args, "rb");
+    if (!f) {
+        char shown[600];
+        path_for_json(shown, sizeof(shown), args);
+        send_fmt("{\"ok\":false,\"error\":\"cannot read recording\","
+                 "\"path\":\"%s\"}", shown);
+        return;
+    }
+    free(s_replay);
+    s_replay = NULL;
+    s_replay_count = 0;
+    int cap = 0;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        int frame = 0, active = 0;
+        unsigned inputs = 0;
+        if (sscanf(line, "{\"frame\":%d,\"inputs\":%u,\"active\":%d}", &frame,
+                   &inputs, &active) != 3)
+            continue;
+        if (!rec_grow(&s_replay, &cap, s_replay_count + 1))
+            break;
+        s_replay[s_replay_count].frame = frame;
+        s_replay[s_replay_count].inputs = inputs;
+        s_replay[s_replay_count].active = (uint32_t)active;
+        s_replay_count++;
+    }
+    fclose(f);
+    s_replay_cursor = 0;
+    s_replay_active = s_replay_count > 0;
+    send_fmt("{\"ok\":true,\"replay\":%s,\"samples\":%d,"
+             "\"first_frame\":%d}", s_replay_active ? "true" : "false",
+             s_replay_count, s_replay_count ? s_replay[0].frame : -1);
+}
+
+static void cmd_replay_stop(const char *args) {
+    (void)args;
+    s_replay_active = 0;
+    send_fmt("{\"ok\":true,\"replay\":false}");
+}
+
+static void cmd_record_frames(const char *args) {
+    char dir[400];
+    int count = 0, every = 1;
+    if (!args || sscanf(args, "%399s %d %d", dir, &count, &every) < 2) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: record_frames <dir> <count> "
+                 "[every_n]\"}");
+        return;
+    }
+    if (every < 1)
+        every = 1;
+    snprintf(s_seq_dir, sizeof(s_seq_dir), "%s", dir);
+    s_seq_every = every;
+    s_seq_limit = count > 0 ? count : 0;
+    s_seq_written = 0;
+    s_seq_err = 0;
+    s_seq_active = 1;
+    char shown[600];
+    path_for_json(shown, sizeof(shown), s_seq_dir);
+    send_fmt("{\"ok\":true,\"recording_frames\":true,\"dir\":\"%s\","
+             "\"count\":%d,\"every\":%d,\"start_frame\":%d}", shown,
+             s_seq_limit, s_seq_every, s_last_frame_seen);
+}
+
+static void cmd_record_frames_stop(const char *args) {
+    (void)args;
+    s_seq_active = 0;
+    send_fmt("{\"ok\":true,\"recording_frames\":false,\"written\":%d,"
+             "\"error\":%d}", s_seq_written, s_seq_err);
+}
+
+static void cmd_record_ring_start(const char *args) {
+    int frames = 300;
+    if (args && *args)
+        frames = atoi(args);
+    ring_start(frames);
+    if (!s_ring_active) {
+        send_fmt("{\"ok\":false,\"error\":\"out of memory for the ring\"}");
+        return;
+    }
+    send_fmt("{\"ok\":true,\"ring\":true,\"frames\":%d}", s_ring_cap);
+}
+
+static void cmd_record_ring_stop(const char *args) {
+    (void)args;
+    s_ring_active = 0;
+    send_fmt("{\"ok\":true,\"ring\":false,\"buffered\":%d}", s_ring_filled);
+}
+
+static void cmd_record_last(const char *args) {
+    if (!args || !*args) {
+        send_fmt("{\"ok\":false,\"error\":\"usage: record_last <dir>\"}");
+        return;
+    }
+    int written = ring_dump(args);
+    char shown[600];
+    path_for_json(shown, sizeof(shown), args);
+    send_fmt("{\"ok\":true,\"dir\":\"%s\",\"frames\":%d,\"buffered\":%d,"
+             "\"input_samples\":%d}", shown, written, s_ring_filled,
+             s_inrec_count);
+}
+
+static void cmd_record_status(const char *args) {
+    (void)args;
+    send_fmt("{\"ok\":true,\"input_recording\":%s,\"input_samples\":%d,"
+             "\"replay\":%s,\"replay_samples\":%d,\"replay_cursor\":%d,"
+             "\"frame_recording\":%s,\"frames_written\":%d,"
+             "\"frame_error\":%d,\"ring\":%s,\"ring_frames\":%d,"
+             "\"ring_buffered\":%d,\"frame\":%d}",
+             s_inrec_active ? "true" : "false", s_inrec_count,
+             s_replay_active ? "true" : "false", s_replay_count,
+             s_replay_cursor, s_seq_active ? "true" : "false", s_seq_written,
+             s_seq_err, s_ring_active ? "true" : "false", s_ring_cap,
+             s_ring_filled, s_last_frame_seen);
 }
 
 static void cmd_screenshot(const char *args) {
@@ -8736,6 +9174,16 @@ static const CmdEntry s_commands[] = {
     {"dump_apu_ram",  cmd_dump_apu_ram},
     {"screenshot",     cmd_screenshot},
     {"render_inject",  cmd_render_inject},
+    {"record_input_start", cmd_record_input_start},
+    {"record_input_stop", cmd_record_input_stop},
+    {"replay_input", cmd_replay_input},
+    {"replay_stop", cmd_replay_stop},
+    {"record_frames", cmd_record_frames},
+    {"record_frames_stop", cmd_record_frames_stop},
+    {"record_ring_start", cmd_record_ring_start},
+    {"record_ring_stop", cmd_record_ring_stop},
+    {"record_last", cmd_record_last},
+    {"record_status", cmd_record_status},
     {"dump_frame_raw", cmd_dump_frame_raw},
     {"stackbal",       cmd_stackbal},
     {"fingerprint",    cmd_fingerprint},
@@ -9129,6 +9577,14 @@ int debug_server_consume_savestate(void) {
 }
 
 uint32_t debug_server_get_controller_inputs(void) {
+    int upcoming = s_last_frame_seen + 1;
+    /* Replay writes the recorded pad state before the runner samples it, and a
+     * live recording stores the same frame's pad state here, so file frame N
+     * always means "the input frame N ran with". */
+    if (s_replay_active)
+        input_replay_apply(upcoming);
+    if (s_inrec_active)
+        input_record_tick(upcoming);
     return s_controller_inputs;
 }
 
@@ -9143,6 +9599,16 @@ void debug_server_poll(void) {
 }
 
 void debug_server_shutdown(void) {
+    /* An armed rolling capture is written out on exit: SNESREC_RING_DIR=<dir>
+     * is the "I forgot to press anything, keep the last seconds" safety net. */
+    if (s_ring_active && s_ring_filled > 0) {
+        const char *dir = getenv("SNESREC_RING_DIR");
+        if (dir && *dir) {
+            int n = ring_dump(dir);
+            fprintf(stderr, "[record] wrote %d buffered frame(s) to %s\n", n,
+                    dir);
+        }
+    }
     s_server_ready = 0;
     // Signal thread to stop
     s_shutdown = 1;
