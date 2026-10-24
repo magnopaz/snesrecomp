@@ -162,6 +162,10 @@ static inline int debug_server_consume_savestate(void) { return -1; }
 static inline uint32_t debug_server_get_controller_inputs(void) { return 0; }
 static inline uint32_t debug_server_get_controller_active_mask(void) { return 0; }
 static inline void debug_server_record_frame(int frame) { (void)frame; }
+static inline int debug_server_toggle_capture(char *msg, unsigned n) {
+    if (msg && n) msg[0] = 0;
+    return 0;
+}
 static inline void debug_server_set_ram(uint8_t *ram, uint32_t ram_size) { (void)ram; (void)ram_size; }
 typedef void (*DebugServerGameSendLine)(const char *line);
 typedef int (*DebugServerGameCommandHandler)(
