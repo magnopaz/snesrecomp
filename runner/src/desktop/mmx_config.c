@@ -72,6 +72,12 @@ static uint16 kDefaultKbdControls[kKeys_Total] = {
   /* Screenshot is opt-in through a port's config.ini so it does not displace
    * existing F-key overlay defaults. */
   N,
+  /* OpenLauncher is set by ConfigUseInGameLauncherDefaults for hosts that offer
+   * the in-game launcher; keep the slot so the positional table stays aligned. */
+  N,
+  /* Record: Alt+R collides with nothing above (Ctrl+R is Reset, R alone toggles
+   * the renderer, Alt+W widens). A port's [KeyMap] can still move it. */
+  A(SDLK_r),
 };
 /* Opt in before parsing: existing hosts keep their legacy slot defaults. */
 void ConfigUseStateMenuDefaults(void) {
@@ -106,6 +112,7 @@ static const KeyNameId kKeyNameId[] = {
   S(Fullscreen), S(Reset),
   S(Pause), S(PauseDimmed), S(Turbo), S(WindowBigger), S(WindowSmaller), S(VolumeUp), S(VolumeDown), S(DisplayPerf), S(ToggleRenderer), S(ToggleWidescreen),
   S(SaveStateMenu), S(Rewind), S(Screenshot), S(OpenLauncher),
+  S(Record),
 };
 #undef S
 #undef M
@@ -157,6 +164,26 @@ static bool KeyMapHash_Add(uint16 key, uint16 cmd) {
   }
   *cur = i + 1;
   return true;
+}
+
+/* Debug/verification aid: report the key each command resolved to, so a port
+ * can prove a hotkey is actually bound (no keyboard required). */
+int ConfigDumpKeyMap(char *out, int size) {
+  int used = 0;
+  for (int i = 0; i < (int)countof(kKeyNameId); i++) {
+    uint16 cmd = kKeyNameId[i].id;
+    if (cmd == kKeys_Null || cmd == kKeys_Controls ||
+        cmd == kKeys_ControlsP2)
+      continue;
+    int key = 0;
+    for (int h = 0; h < keymap_hash_size; h++)
+      if (keymap_hash[h].cmd == cmd) { key = keymap_hash[h].key; break; }
+    used += snprintf(out + used, size > used ? size - used : 0, "%s%s=0x%04x",
+                     used ? "," : "", kKeyNameId[i].name, (unsigned)key);
+    if (used >= size - 1)
+      break;
+  }
+  return used;
 }
 
 static int KeyMapHash_Find(uint16 key) {

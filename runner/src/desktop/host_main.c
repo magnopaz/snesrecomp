@@ -406,6 +406,7 @@ static struct RendererFuncs g_renderer_funcs;
 /* Set by the hotkeys; consumed once in the frame loop. */
 static int g_savestate_menu_hotkey;
 static int g_rewind_hotkey;
+static int g_record_hotkey;   /* start/stop a recording */
 static int g_open_launcher_hotkey;   /* in_game_launcher only */
 static uint64_t g_state_generation;
 
@@ -3155,6 +3156,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
       { "Screenshot", kKeys_Screenshot }, { "DisplayPerf", kKeys_DisplayPerf },
       { "Pause", kKeys_Pause }, { "Reset", kKeys_Reset },
       { "OpenLauncher", kKeys_OpenLauncher },
+      { "Record", kKeys_Record },
     };
     static const SDL_Keycode kKeys[] = {
       SDLK_KP_PLUS, SDLK_KP_MINUS, SDLK_F11, SDLK_F12, SDLK_f, SDLK_p, SDLK_EQUALS, SDLK_MINUS,
@@ -4151,6 +4153,13 @@ error_reading:;
       }
     }
     g_rewind_hotkey = 0;
+    if (g_record_hotkey) {
+      g_record_hotkey = 0;
+      char msg[160];
+      int recording = debug_server_toggle_capture(msg, sizeof(msg));
+      snes_osd_push(msg, 2200);
+      (void)recording;
+    }
     /* Exactly ONE poll_open per frame: it latches the previous word to edge
      * detect on, so a second call in the same frame eats the edge. */
     (void)snes_savestate_menu_poll_open(human);
@@ -4476,6 +4485,7 @@ static void HandleCommand(uint32 j, bool pressed) {
     case kKeys_DisplayPerf: snes_osd_toggle_fps(); break;
     case kKeys_SaveStateMenu: g_savestate_menu_hotkey = 1; break;
     case kKeys_Rewind: g_rewind_hotkey = 1; break;
+    case kKeys_Record: g_record_hotkey = 1; break;
     case kKeys_Screenshot: RequestScreenshot(); break;
     case kKeys_OpenLauncher:
       if (g_game->in_game_launcher) g_open_launcher_hotkey = 1;

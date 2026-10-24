@@ -44,6 +44,9 @@ enum {
   /* Reopen the launcher mid-game (SnesDesktopHostGame.in_game_launcher).
    * Appended for the same reason as SaveStateMenu. */
   kKeys_OpenLauncher,
+  /* Start/stop a recording (input log + frame sequence). Appended so the
+   * positional tables above keep their numbering. */
+  kKeys_Record,
   kKeys_Total,
 };
 
@@ -210,6 +213,8 @@ void ConfigReloadGamepadMap(const char *filename);
  * generated default and mapped it to the current one; WriteConfigFile then
  * rewrites that line. The host writes the file once when this is set. */
 bool ConfigKeyMapMigrated(void);
+/* "Name=0xcode,..." for every bound command; for verification. */
+int ConfigDumpKeyMap(char *out, int size);
 /* True when the file carried the former generated GamepadDeadzone (10000 raw
  * units, 30%) and it was read as the current default instead. The caller
  * rewrites config.ini once so the file says what the game is using. */

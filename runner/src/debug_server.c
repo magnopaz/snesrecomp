@@ -10,6 +10,8 @@
 
 #ifdef _WIN32
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
+#include <direct.h>
+#include <io.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
@@ -5304,6 +5306,83 @@ static int ring_dump(const char *dir) {
     return written;
 }
 
+/* ---- hotkey capture ---------------------------------------------------- */
+static int s_cap_active = 0;
+static char s_cap_dir[400] = {0};
+static int s_cap_frames_at_start = 0;
+
+static int ensure_dir(const char *path) {
+#ifdef _WIN32
+    int rc = _mkdir(path);
+#else
+    int rc = mkdir(path, 0777);
+#endif
+    return rc == 0 || errno == EEXIST;
+}
+
+int debug_server_toggle_capture(char *msg, unsigned msg_size) {
+    if (!s_cap_active) {
+        const char *base = getenv("SNESREC_RECORD_DIR");
+        if (!base || !*base)
+            base = "captures";
+        if (!ensure_dir(base)) {
+            snprintf(msg, msg_size, "REC: cannot create %s", base);
+            return 0;
+        }
+        time_t now = time(NULL);
+        struct tm tmv;
+#ifdef _WIN32
+        localtime_s(&tmv, &now);
+#else
+        localtime_r(&now, &tmv);
+#endif
+        snprintf(s_cap_dir, sizeof(s_cap_dir), "%s/rec_%04d%02d%02d_%02d%02d%02d",
+                 base, tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+        if (!ensure_dir(s_cap_dir)) {
+            snprintf(msg, msg_size, "REC: cannot create capture folder");
+            return 0;
+        }
+        char frames_dir[600];
+        snprintf(frames_dir, sizeof(frames_dir), "%s/frames", s_cap_dir);
+        if (!ensure_dir(frames_dir)) {
+            snprintf(msg, msg_size, "REC: cannot create frames folder");
+            return 0;
+        }
+        /* Input log and frame sequence start together. */
+        free(s_inrec);
+        s_inrec = NULL;
+        s_inrec_count = 0;
+        s_inrec_cap = 0;
+        s_inrec_active = 1;
+        snprintf(s_seq_dir, sizeof(s_seq_dir), "%s", frames_dir);
+        s_seq_every = 1;
+        s_seq_limit = 0;
+        s_seq_written = 0;
+        s_seq_err = 0;
+        s_seq_active = 1;
+        s_cap_frames_at_start = 0;
+        s_cap_active = 1;
+        snprintf(msg, msg_size, "REC started");
+        return 1;
+    }
+
+    s_inrec_active = 0;
+    s_seq_active = 0;
+    s_cap_active = 0;
+    char input_path[700];
+    snprintf(input_path, sizeof(input_path), "%s/input_log.jsonl", s_cap_dir);
+    FILE *f = fopen(input_path, "wb");
+    if (f) {
+        for (int i = 0; i < s_inrec_count; i++)
+            fprintf(f, "{\"frame\":%d,\"inputs\":%u,\"active\":%u}\n",
+                    s_inrec[i].frame, s_inrec[i].inputs, s_inrec[i].active);
+        fclose(f);
+    }
+    snprintf(msg, msg_size, "REC saved %d frames", s_seq_written);
+    return 0;
+}
+
 static void cmd_record_input_start(const char *args) {
     (void)args;
     free(s_inrec);
@@ -5443,6 +5522,22 @@ static void cmd_record_last(const char *args) {
     send_fmt("{\"ok\":true,\"dir\":\"%s\",\"frames\":%d,\"buffered\":%d,"
              "\"input_samples\":%d}", shown, written, s_ring_filled,
              s_inrec_count);
+}
+
+static void cmd_keymap_dump(const char *args) {
+    (void)args;
+    extern int ConfigDumpKeyMap(char *out, int size);
+    static char buf[4096];
+    ConfigDumpKeyMap(buf, (int)sizeof(buf));
+    send_fmt("{\"ok\":true,\"keymap\":\"%s\"}", buf);
+}
+
+static void cmd_capture_toggle(const char *args) {
+    (void)args;
+    char msg[200];
+    int active = debug_server_toggle_capture(msg, sizeof(msg));
+    send_fmt("{\"ok\":true,\"recording\":%s,\"message\":\"%s\"}",
+             active ? "true" : "false", msg);
 }
 
 static void cmd_record_status(const char *args) {
@@ -9183,6 +9278,8 @@ static const CmdEntry s_commands[] = {
     {"record_ring_start", cmd_record_ring_start},
     {"record_ring_stop", cmd_record_ring_stop},
     {"record_last", cmd_record_last},
+    {"keymap_dump", cmd_keymap_dump},
+    {"capture_toggle", cmd_capture_toggle},
     {"record_status", cmd_record_status},
     {"dump_frame_raw", cmd_dump_frame_raw},
     {"stackbal",       cmd_stackbal},

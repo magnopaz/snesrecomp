@@ -74,6 +74,10 @@ uint32_t debug_server_get_controller_active_mask(void);
 // into the history ring buffer. Called once per frame from common_cpu_infra.
 // Cross-runtime divergence comparison is done by an external tool that
 // reads from both runtimes' TCP servers — not in here.
+/* Start/stop a recording from a hotkey: input log plus a BMP per frame into
+ * <SNESREC_RECORD_DIR or captures>/rec_<timestamp>/. Returns 1 while recording
+ * is active and fills msg with a short status line for the OSD. */
+int debug_server_toggle_capture(char *msg, unsigned msg_size);
 void debug_server_record_frame(int frame);
 
 // Set pointers the server needs to inspect game state.
