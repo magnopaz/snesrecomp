@@ -407,6 +407,7 @@ static struct RendererFuncs g_renderer_funcs;
 static int g_savestate_menu_hotkey;
 static int g_rewind_hotkey;
 static int g_record_hotkey;   /* start/stop a recording */
+static uint32 g_last_inputs;  /* pad state of the frame being recorded */
 static int g_open_launcher_hotkey;   /* in_game_launcher only */
 static uint64_t g_state_generation;
 
@@ -1248,6 +1249,126 @@ static void WritePpm(const char *path, const uint8 *pixel_buffer, int pitch,
     host_report_breadcrumb("screenshot: wrote %s (%dx%d) at frame %u", path, w, h, frame);
 }
 
+#include <time.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
+
+/* ---- hotkey recording (independent of the debug server) ----------------
+ * Alt+R starts a take and Alt+R again finishes it: one BMP per presented frame
+ * plus a replayable input log, in <SNESREC_RECORD_DIR or captures>/rec_<time>/.
+ * Kept in the host so it also works in builds without the debug server. */
+static int s_rec_active;
+static char s_rec_dir[512];
+static FILE *s_rec_log;
+static int s_rec_seq;
+static int s_rec_late;
+
+static int RecEnsureDir(const char *path) {
+#ifdef _WIN32
+  int rc = _mkdir(path);
+#else
+  int rc = mkdir(path, 0777);
+#endif
+  return rc == 0 || errno == EEXIST;
+}
+
+static int RecWriteBmp(const char *path, const uint8 *buf, int w, int h) {
+  FILE *f = fopen(path, "wb");
+  if (!f) return 0;
+  int row = w * 3, pad = (4 - (row % 4)) % 4, stride = row + pad;
+  int img = stride * h, file = 54 + img;
+  uint8 hdr[54] = {0};
+  hdr[0] = 'B'; hdr[1] = 'M';
+  hdr[2] = (uint8)file; hdr[3] = (uint8)(file >> 8);
+  hdr[4] = (uint8)(file >> 16); hdr[5] = (uint8)(file >> 24);
+  hdr[10] = 54; hdr[14] = 40;
+  hdr[18] = (uint8)w; hdr[19] = (uint8)(w >> 8);
+  int neg = -h;
+  memcpy(&hdr[22], &neg, 4);
+  hdr[26] = 1; hdr[28] = 24;
+  hdr[34] = (uint8)img; hdr[35] = (uint8)(img >> 8);
+  hdr[36] = (uint8)(img >> 16); hdr[37] = (uint8)(img >> 24);
+  fwrite(hdr, 1, 54, f);
+  static uint8 rowbuf[kSnesDesktopMaxFrameWidth * 3 + 8];
+  for (int y = 0; y < h; y++) {
+    const uint8 *src = buf + (size_t)y * w * 4;
+    memset(rowbuf, 0, sizeof(rowbuf));
+    for (int x = 0; x < w; x++) {
+      rowbuf[x * 3 + 0] = src[x * 4 + 0];
+      rowbuf[x * 3 + 1] = src[x * 4 + 1];
+      rowbuf[x * 3 + 2] = src[x * 4 + 2];
+    }
+    fwrite(rowbuf, 1, (size_t)stride, f);
+  }
+  return fclose(f) == 0;
+}
+
+static void RecToggle(uint32 inputs) {
+  if (!s_rec_active) {
+    const char *base = getenv("SNESREC_RECORD_DIR");
+    if (!base || !*base) base = "captures";
+    if (!RecEnsureDir(base)) {
+      snes_osd_push("REC: cannot create captures folder", 2500);
+      return;
+    }
+    time_t now = time(NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &now);
+#else
+    localtime_r(&now, &tmv);
+#endif
+    snprintf(s_rec_dir, sizeof(s_rec_dir),
+             "%s/rec_%04d%02d%02d_%02d%02d%02d", base, tmv.tm_year + 1900,
+             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    char frames[600];
+    snprintf(frames, sizeof(frames), "%s/frames", s_rec_dir);
+    if (!RecEnsureDir(s_rec_dir) || !RecEnsureDir(frames)) {
+      snes_osd_push("REC: cannot create capture folder", 2500);
+      return;
+    }
+    char logpath[700];
+    snprintf(logpath, sizeof(logpath), "%s/input_log.jsonl", s_rec_dir);
+    s_rec_log = fopen(logpath, "wb");
+    s_rec_seq = 0;
+    s_rec_late = 0;
+    s_rec_active = 1;
+    (void)inputs;
+    snes_osd_push("REC started", 2000);
+    printf("[record] %s\n", s_rec_dir);
+    return;
+  }
+  if (s_rec_log) fclose(s_rec_log);
+  s_rec_log = NULL;
+  s_rec_active = 0;
+  char msg[128];
+  snprintf(msg, sizeof(msg), "REC saved %d frames", s_rec_seq);
+  snes_osd_push(msg, 2500);
+  printf("[record] %s: %d frames\n", s_rec_dir, s_rec_seq);
+}
+
+void HostRecordToggle(void) { RecToggle(g_last_inputs); }
+int HostRecordActive(void) { return s_rec_active; }
+int HostRecordFrames(void) { return s_rec_seq; }
+const char *HostRecordDir(void) { return s_rec_dir; }
+
+/* Called once per presented frame, after the present filled g_frozen_frame. */
+static void RecTick(uint32 inputs) {
+  if (!s_rec_active) return;
+  if (s_rec_log)
+    fprintf(s_rec_log, "{\"frame\":%d,\"inputs\":%u}\n", s_rec_seq, inputs);
+  if (g_frozen_w > 0 && g_frozen_h > 0) {
+    char path[700];
+    snprintf(path, sizeof(path), "%s/frames/frame_%06d.bmp", s_rec_dir,
+             s_rec_seq);
+    if (!RecWriteBmp(path, g_frozen_frame, g_frozen_w, g_frozen_h))
+      s_rec_late++;
+  }
+  s_rec_seq++;
+  if ((s_rec_seq & 63) == 0 && s_rec_log) fflush(s_rec_log);
+}
+
 static void DrawPpuFrameWithPerf(void) {
   double profile_start = ProfileStart();
   PreparePpuFrame();
@@ -1339,6 +1460,7 @@ static void DrawPpuFrameWithPerf(void) {
                pixel_buffer + (size_t)y * (size_t)pitch, (size_t)row_bytes);
       g_frozen_w = g_snes_width * render_scale;
       g_frozen_h = rows;
+      RecTick(g_last_inputs);
     }
   }
   ComposeOsd(pixel_buffer, pitch, g_snes_width * render_scale,
@@ -4155,10 +4277,7 @@ error_reading:;
     g_rewind_hotkey = 0;
     if (g_record_hotkey) {
       g_record_hotkey = 0;
-      char msg[160];
-      int recording = debug_server_toggle_capture(msg, sizeof(msg));
-      snes_osd_push(msg, 2200);
-      (void)recording;
+      RecToggle(0);
     }
     /* Exactly ONE poll_open per frame: it latches the previous word to edge
      * detect on, so a second call in the same frame eats the edge. */
@@ -4185,6 +4304,7 @@ error_reading:;
       break;
     }
     inputs |= debug_server_get_controller_inputs();
+    g_last_inputs = inputs;
     double profile_start = ProfileStart();
     double guest_start = MonotonicSeconds();
     if (game->before_run_frame) game->before_run_frame();

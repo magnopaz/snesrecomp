@@ -5534,20 +5534,31 @@ static void cmd_keymap_dump(const char *args) {
 
 static void cmd_capture_toggle(const char *args) {
     (void)args;
-    char msg[200];
-    int active = debug_server_toggle_capture(msg, sizeof(msg));
-    send_fmt("{\"ok\":true,\"recording\":%s,\"message\":\"%s\"}",
-             active ? "true" : "false", msg);
+    /* Same recorder the Alt+R hotkey drives. */
+    extern void HostRecordToggle(void);
+    extern int HostRecordActive(void);
+    extern int HostRecordFrames(void);
+    extern const char *HostRecordDir(void);
+    HostRecordToggle();
+    char shown[600];
+    path_for_json(shown, sizeof(shown), HostRecordDir());
+    send_fmt("{\"ok\":true,\"recording\":%s,\"frames\":%d,"
+             "\"dir\":\"%s\"}", HostRecordActive() ? "true" : "false",
+             HostRecordFrames(), shown);
 }
 
 static void cmd_record_status(const char *args) {
     (void)args;
+    extern int HostRecordActive(void);
+    extern int HostRecordFrames(void);
     send_fmt("{\"ok\":true,\"input_recording\":%s,\"input_samples\":%d,"
+             "\"hotkey_recording\":%s,\"hotkey_frames\":%d,"
              "\"replay\":%s,\"replay_samples\":%d,\"replay_cursor\":%d,"
              "\"frame_recording\":%s,\"frames_written\":%d,"
              "\"frame_error\":%d,\"ring\":%s,\"ring_frames\":%d,"
              "\"ring_buffered\":%d,\"frame\":%d}",
              s_inrec_active ? "true" : "false", s_inrec_count,
+             HostRecordActive() ? "true" : "false", HostRecordFrames(),
              s_replay_active ? "true" : "false", s_replay_count,
              s_replay_cursor, s_seq_active ? "true" : "false", s_seq_written,
              s_seq_err, s_ring_active ? "true" : "false", s_ring_cap,
